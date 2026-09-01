@@ -206,7 +206,7 @@ function State.view(atMs)
   local limit = Config.MAX_VISIBLE
   for index = 1, math.min(#all, limit) do
     local effect = all[index]
-    chips[#chips + 1] = {
+    chips[index] = {
       id = effect.owner .. ":" .. effect.id,
       label = effect.label,
       icon = effect.icon,

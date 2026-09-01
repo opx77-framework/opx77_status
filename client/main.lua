@@ -53,9 +53,11 @@ end
 ---@param view table
 ---@return string
 local function signature(view)
+  local chips = view.chips
   local parts = { tostring(view.hidden) }
-  for _, chip in ipairs(view.chips) do
-    parts[#parts + 1] = table.concat({
+  for index = 1, #chips do
+    local chip = chips[index]
+    parts[index + 1] = table.concat({
       chip.id, chip.label, chip.icon or "", chip.tone or "",
       tostring(chip.progress or ""), tostring(chip.totalMs or ""),
     }, "\1")
@@ -186,28 +188,40 @@ local function tick()
   local atMs = nowMs()
 
   local due = State.expired(atMs)
-  for _, effect in ipairs(due) do
+  local expired = #due
+  for index = 1, expired do
+    local effect = due[index]
     State.remove(effect.owner, effect.id)
     emit(effect, "expired")
   end
 
-  local stopped = {}
+  -- Resolved once for the sweep. It cannot change between two owners of the same pass, and
+  -- inside the loop it was two `type` calls per owner every TICK_MS.
+  local generationOf
+  if type(Open77.resource) == "table" and type(Open77.resource.generation) == "function" then
+    generationOf = Open77.resource.generation
+  end
+
+  -- Built only when there is something to put in it: the common tick has nothing stopped,
+  -- and an empty table four times a second is four allocations that answer nothing.
+  local stopped, stoppedCount = nil, 0
   for owner, generation in pairs(State.generations) do
     local running = GetResourceState(owner) == "running"
     local current
-    if type(Open77.resource) == "table" and type(Open77.resource.generation) == "function" then
-      current = Open77.resource.generation(owner)
-    end
+    if generationOf ~= nil then current = generationOf(owner) end
     if not running or (current ~= nil and current ~= generation) then
-      stopped[#stopped + 1] = owner
+      stoppedCount = stoppedCount + 1
+      stopped = stopped or {}
+      stopped[stoppedCount] = owner
     end
   end
-  for _, owner in ipairs(stopped) do
+  for index = 1, stoppedCount do
+    local owner = stopped[index]
     State.removeOwner(owner)
     State.generations[owner] = nil
   end
 
-  if #due > 0 or #stopped > 0 then draw() end
+  if expired > 0 or stoppedCount > 0 then draw() end
 end
 
 AddEventHandler("onClientResourceStart", function(name)
