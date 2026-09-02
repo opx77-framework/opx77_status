@@ -85,13 +85,6 @@ end
 
 Runtime.draw = draw
 
---- Kept for the export surface, which refuses when there is nothing to publish to.
----@return boolean
-function Runtime.unavailable()
-  return false
-end
-
-
 --- Note the caller's generation, dropping everything it held if it has reloaded.
 ---@param owner string
 ---@param generation integer
@@ -235,7 +228,23 @@ AddEventHandler("onClientResourceStart", function(name)
   end)
 end)
 
+--- Both halves of teardown, as the first-party client services do it (open77_zones and
+--- open77_worldui both branch on the name here): our own stop has to take the strip down,
+--- and another resource's stop takes its chips down now rather than at the next tick.
 AddEventHandler("onClientResourceStop", function(name)
-  if name ~= RESOURCE then return end
-  drawn = nil
+  if name == RESOURCE then
+    -- The chips are drawn in opx77_hud's page, and nothing over there knows this resource
+    -- stopped: the last thing it does is publish an empty strip, or its chips stay on screen
+    -- for the rest of the session. `force`, because `drawn` is only a record of what was last
+    -- published, and a stop is the one publish with no later one to correct it.
+    State.byOwner = {}
+    State.generations = {}
+    draw(true)
+    -- No `emit` for the effects that just went. An owner's handler is free to call straight
+    -- back into an export, and this VM is halfway through stopping.
+    return
+  end
+
+  if State.removeOwner(name) > 0 then draw() end
+  State.generations[name] = nil
 end)

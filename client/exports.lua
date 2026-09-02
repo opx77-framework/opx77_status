@@ -1,6 +1,5 @@
 --- Every export answers a table carrying `ok`, and an `error` code when it is false.
 
-local Config = OPX_STATUS_CONFIG
 local State = OpxStatus.state
 local Runtime = OpxStatus.runtime
 
@@ -26,15 +25,6 @@ local function caller()
   return owner, generation
 end
 
---- A refusal for every call, for when WebUI.create failed and nothing draws.
----@return table|nil
-local function unavailable()
-  if Runtime.unavailable and Runtime.unavailable() then
-    return response(false, { error = "no_surface" })
-  end
-  return nil
-end
-
 
 ---@alias StatusTone "ok"|"warn"|"bad"|"accent"|"bleed"|"burn"|"shock"|"chem"
 
@@ -53,8 +43,6 @@ end
 ---@param spec StatusSpec
 ---@return table
 exports("add", function(spec)
-  local gone = unavailable()
-  if gone then return gone end
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   local effect, reason = Runtime.add(owner, spec)
@@ -67,8 +55,6 @@ end)
 ---@param patch StatusSpec fields absent from it keep the value they have
 ---@return table
 exports("update", function(id, patch)
-  local gone = unavailable()
-  if gone then return gone end
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   if not State.validName(id, 64) then return response(false, { error = "invalid_id" }) end
@@ -81,8 +67,6 @@ end)
 ---@param id string
 ---@return table
 exports("remove", function(id)
-  local gone = unavailable()
-  if gone then return gone end
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   if not State.validName(id, 64) then return response(false, { error = "invalid_id" }) end
@@ -93,8 +77,6 @@ end)
 --- Take down everything of yours. Never touches another resource's.
 ---@return table
 exports("clear", function()
-  local gone = unavailable()
-  if gone then return gone end
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   return response(true, { removed = Runtime.clear(owner) })

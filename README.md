@@ -16,6 +16,7 @@ Without it every resource that wanted to say something on screen would draw its 
 - Chips with a label, a tone, a priority and an optional countdown
 - Effects sorted by priority, so the urgent one is never pushed off by the trivial one
 - An effect belongs to the resource that added it, and goes when that resource stops
+- Stopping this resource takes the strip down with it, instead of leaving its chips on screen
 - Countdowns run on the page, so a ticking timer costs no traffic
 
 ## Exports
