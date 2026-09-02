@@ -3,7 +3,7 @@
 
 ---@alias CitizenId string  the character key, e.g. "H7K-M4X3"
 
----@alias NeedKey "hunger"|"thirst"|"stamina"|"ram"|"streetCred"
+---@alias NeedKey "hunger"|"thirst"|"stamina"|"streetCred"
 
 --- A presentation role, or one of 2077's damage types.
 ---@alias StatusTone "ok"|"warn"|"bad"|"accent"|"bleed"|"burn"|"shock"|"chem"
@@ -73,7 +73,6 @@
 ---@field hunger number      0-100
 ---@field thirst number      0-100
 ---@field stamina number     0-100
----@field ram number         0-100
 ---@field streetCred number  0-100000
 
 --- The payload of OPX_STATUS_CONFIG.NEEDS_EVENT, raised on the client after every change.

@@ -4,17 +4,20 @@ OpxStatus = OpxStatus or {}
 
 local Config = OPX_STATUS_CONFIG
 
---- How often expired effects and stopped owners are swept, and the event raised beside each
---- effect's own so one listener can watch them all. Cadence and a name, not settings.
+--- How often expired effects are swept.
 local TICK_MS = 250
 
---- The most effects one resource may hold. A guard rail against a caller that leaks, not a
---- number an operator would tune.
+--- How often every owner is re-checked against the host, as a backstop for a generation that
+--- moved without a stop we saw.
+local OWNER_SWEEP_MS = 1000
+
+--- The most effects one resource may hold.
 local MAX_PER_OWNER = 24
+
+--- Raised beside each effect's own event, so one listener can watch them all.
 local GLOBAL_EVENT = "opx77:status"
 
---- What opx77_hud listens on to draw the strip. A client-side event, because the client
---- runtime has a cross-resource bus and this is exactly what it is for.
+--- What opx77_hud listens on to draw the strip.
 local EFFECTS_EVENT = "opx77:status:effects"
 local State = OpxStatus.state
 
@@ -106,8 +109,8 @@ function Runtime.add(owner, spec)
   return effect
 end
 
---- The patched value, or the held one when the patch says nothing. An `if` rather than
---- `given ~= nil and given or held`, which collapses on `false`.
+--- The patched value, or the held one when the patch says nothing. An `if`, because
+--- `given ~= nil and given or held` collapses on `false`.
 ---@param given any
 ---@param held any
 ---@return any
@@ -168,6 +171,42 @@ function Runtime.clear(owner)
   return removed
 end
 
+local nextOwnerSweepMs = 0
+
+--- Drop the effects of owners that have stopped or whose code has been replaced.
+---@param atMs integer
+---@return integer removed
+local function sweepOwners(atMs)
+  if atMs < nextOwnerSweepMs then return 0 end
+  nextOwnerSweepMs = atMs + OWNER_SWEEP_MS
+
+  -- resolved once per sweep rather than twice per owner
+  local generationOf
+  if type(Open77.resource) == "table" and type(Open77.resource.generation) == "function" then
+    generationOf = Open77.resource.generation
+  end
+
+  -- built lazily, and built at all because removing an owner mutates the table this walks
+  local stopped, stoppedCount = nil, 0
+  for owner, generation in pairs(State.generations) do
+    local running = GetResourceState(owner) == "running"
+    local current
+    if generationOf ~= nil then current = generationOf(owner) end
+    if not running or (current ~= nil and current ~= generation) then
+      stoppedCount = stoppedCount + 1
+      stopped = stopped or {}
+      stopped[stoppedCount] = owner
+    end
+  end
+
+  for index = 1, stoppedCount do
+    local owner = stopped[index]
+    State.removeOwner(owner)
+    State.generations[owner] = nil
+  end
+  return stoppedCount
+end
+
 --- Removes what expired, and what an owner that stopped or reloaded left behind.
 local function tick()
   local atMs = nowMs()
@@ -180,33 +219,7 @@ local function tick()
     emit(effect, "expired")
   end
 
-  -- Resolved once for the sweep. It cannot change between two owners of the same pass, and
-  -- inside the loop it was two `type` calls per owner every TICK_MS.
-  local generationOf
-  if type(Open77.resource) == "table" and type(Open77.resource.generation) == "function" then
-    generationOf = Open77.resource.generation
-  end
-
-  -- Built only when there is something to put in it: the common tick has nothing stopped,
-  -- and an empty table four times a second is four allocations that answer nothing.
-  local stopped, stoppedCount = nil, 0
-  for owner, generation in pairs(State.generations) do
-    local running = GetResourceState(owner) == "running"
-    local current
-    if generationOf ~= nil then current = generationOf(owner) end
-    if not running or (current ~= nil and current ~= generation) then
-      stoppedCount = stoppedCount + 1
-      stopped = stopped or {}
-      stopped[stoppedCount] = owner
-    end
-  end
-  for index = 1, stoppedCount do
-    local owner = stopped[index]
-    State.removeOwner(owner)
-    State.generations[owner] = nil
-  end
-
-  if expired > 0 or stoppedCount > 0 then draw() end
+  if expired > 0 or sweepOwners(atMs) > 0 then draw() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -216,7 +229,7 @@ end
 local Needs = OpxStatus.needs
 
 --- How long the client waits before asking the server half again for a character it has an
---- id for but no values.
+--- id for but no values. The needs thread runs at least this often, so the name is the wait.
 local PULL_RETRY_MS = 10000
 
 local lastDecayAtMs, lastPushAtMs, lastPullAtMs = 0, 0, 0
@@ -263,7 +276,9 @@ local function push(atMs, force)
     Open77.log.warn(("needs not pushed: %s"):format(tostring(reason)))
     return false
   end
-  Needs.pushed = values
+  -- pending, not pushed: `accepted` says the event left, not that the server kept it, and a
+  -- push past its rate limit is dropped there in silence
+  Needs.pending = values
   lastPushAtMs = atMs
   return true
 end
@@ -328,6 +343,14 @@ AddEventHandler("opx77:client:onPlayerUnloaded", function()
   publishNeeds("unloaded", {})
 end)
 
+--- The server kept a push. Only now is the drift it carried settled: until this arrives the
+--- values stay in `drift` and the next tick sends them again.
+RegisterNetEvent("opx77_status:pushed", function(citizenId)
+  if citizenId ~= Needs.citizenId or Needs.pending == nil then return end
+  Needs.pushed = Needs.pending
+  Needs.pending = nil
+end)
+
 --- The server half answered the pull. A late answer for a character that has already been
 --- swapped out is dropped.
 RegisterNetEvent("opx77_status:values", function(citizenId, values)
@@ -341,8 +364,8 @@ RegisterNetEvent("opx77_status:values", function(citizenId, values)
   publishNeeds("loaded", changed)
 end)
 
---- Catch up when this resource starts mid-session: the core's loaded event has already been
---- and gone, so the character is read straight off its export. Coroutine only.
+--- Catch up when this resource starts mid-session, reading the character straight off the
+--- core's export because its loaded event has already been and gone. Coroutine only.
 local function adoptRunningCharacter()
   if GetResourceState(CORE) ~= "running" then return end
   local promise = Open77.exports.call(CORE, "GetPlayerData")
@@ -352,22 +375,38 @@ local function adoptRunningCharacter()
   if type(result.data) == "table" then Runtime.bindCharacter(result.data.citizenId) end
 end
 
+--- One pass of a forever-thread. A raise from a host call would otherwise end that loop for
+--- the session, so it is logged once per run of failures and the loop carries on.
+---@param label string
+---@param body fun()
+---@param failing boolean  whether the previous pass already failed
+---@return boolean failing
+local function guarded(label, body, failing)
+  local ok, reason = pcall(body)
+  if ok then return false end
+  if not failing then Open77.log.error(("%s failed: %s"):format(label, tostring(reason))) end
+  return true
+end
+
 AddEventHandler("onClientResourceStart", function(name)
   if name ~= RESOURCE then return end
 
   CreateThread(function()
+    local failing = false
     while true do
-      tick()
+      failing = guarded("the effect tick", tick, failing)
       Wait(TICK_MS)
     end
   end)
 
   CreateThread(function()
-    adoptRunningCharacter()
-    local cadence = math.max(1000, math.min(Config.DECAY_MS, Config.PUSH_MS))
+    guarded("the character lookup", adoptRunningCharacter, false)
+    -- the finest of the three intervals this loop serves, so each keeps the name it carries
+    local cadence = math.max(1000, math.min(Config.DECAY_MS, Config.PUSH_MS, PULL_RETRY_MS))
+    local failing = false
     while true do
       Wait(cadence)
-      needsTick()
+      failing = guarded("the needs tick", needsTick, failing)
     end
   end)
 end)
@@ -380,11 +419,9 @@ AddEventHandler("onClientResourceStop", function(name)
     Runtime.pushNeeds(nowMs(), true)
     State.byOwner = {}
     State.generations = {}
-    -- forced: nothing in opx77_hud's page knows this resource stopped, and there is no
-    -- later publish to correct an empty strip with
-    draw(true)
-    -- no `emit`: an owner's handler is free to call straight back into an export, and this
-    -- VM is halfway through stopping
+    draw(true) -- forced: there is no later publish to correct an empty strip with
+    -- no `emit`: an owner's handler may call straight back into an export, and this VM is
+    -- halfway through stopping
     return
   end
 

@@ -15,7 +15,6 @@ OPX_STATUS_CONFIG = {
     hunger = { MIN = 0, MAX = 100, DEFAULT = 100, DECAY_PER_MINUTE = 0.20 },
     thirst = { MIN = 0, MAX = 100, DEFAULT = 100, DECAY_PER_MINUTE = 0.28 },
     stamina = { MIN = 0, MAX = 100, DEFAULT = 100 },
-    ram = { MIN = 0, MAX = 100, DEFAULT = 100 },
     streetCred = { MIN = 0, MAX = 100000, DEFAULT = 0 },
   },
 

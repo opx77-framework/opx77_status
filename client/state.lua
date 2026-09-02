@@ -3,9 +3,10 @@
 OpxStatus = OpxStatus or {}
 
 --- Mirrors `version` in open77.lua, which no Lua code can read; a release moves both lines.
-OpxStatus.VERSION = "0.2.0"
+OpxStatus.VERSION = "0.3.0"
 
 local Config = OPX_STATUS_CONFIG
+local Text = OpxStatus.Text
 
 local State = {}
 OpxStatus.state = State
@@ -42,19 +43,6 @@ function State.validName(value, maximum)
     and value:match("^[%w_:%-%.]+$") ~= nil
 end
 
---- Display text, cleaned rather than refused: a label is cosmetic.
----@param value any
----@param maximum integer
----@return string|nil
-local function displayText(value, maximum)
-  if value == nil then return nil end
-  if type(value) == "number" then value = tostring(value) end
-  if type(value) ~= "string" then return nil end
-  value = value:gsub("[%c]", " ")
-  if #value > maximum then value = value:sub(1, maximum) end
-  return value
-end
-
 --- Count a caller's opaque table, refusing rather than truncating it.
 ---@param value any
 ---@param depth integer
@@ -89,7 +77,7 @@ function State.normalize(owner, spec, atMs)
   if id == nil then return nil, "missing_id" end
   if not State.validName(id, 64) then return nil, "invalid_id" end
 
-  local label = displayText(spec.label, MAX_LABEL)
+  local label = Text.clean(spec.label, MAX_LABEL)
   if label == nil or label == "" then return nil, "invalid_label" end
 
   if spec.event ~= nil and not State.validName(spec.event, MAX_EVENT) then
@@ -122,7 +110,7 @@ function State.normalize(owner, spec, atMs)
     owner = owner,
     id = id,
     label = label,
-    icon = displayText(spec.icon, MAX_ICON),
+    icon = Text.clean(spec.icon, MAX_ICON),
     tone = tone,
     -- absolute, not remaining: the page counts down from this on its own clock
     expiresAtMs = duration and (atMs + math.floor(duration)) or nil,
@@ -255,9 +243,14 @@ Needs.ready = false
 ---@type NeedValues
 Needs.values = {}
 
---- The last values sent to the server, so a push that would say nothing is skipped.
+--- The last values the server acknowledged, so a push that would say nothing is skipped.
 ---@type NeedValues|nil
 Needs.pushed = nil
+
+--- A push the server has not acknowledged yet. It stays out of `pushed`, so the drift it
+--- carries survives a push the server dropped and is sent again.
+---@type NeedValues|nil
+Needs.pending = nil
 
 --- Whether a key is a need this resource owns.
 ---@param key any
@@ -301,6 +294,7 @@ function Needs.begin(citizenId)
   Needs.ready = false
   Needs.values = Needs.defaults()
   Needs.pushed = nil
+  Needs.pending = nil
 end
 
 --- Adopt what the server sent, with the defaults filling anything it left out.
@@ -317,6 +311,7 @@ function Needs.receive(raw)
   Needs.ready = true
   -- what the server just said IS the last push: there is nothing to send back yet
   Needs.pushed = Needs.snapshot()
+  Needs.pending = nil
 end
 
 function Needs.forget()
@@ -324,6 +319,7 @@ function Needs.forget()
   Needs.ready = false
   Needs.values = {}
   Needs.pushed = nil
+  Needs.pending = nil
 end
 
 --- Apply a patch, absolute or relative, and answer which keys actually moved.
@@ -365,8 +361,9 @@ function Needs.decay(elapsedMs)
   local minutes = elapsedMs / 60000
   local patch, count = {}, 0
   for key, field in pairs(FIELDS) do
+    -- `finite`, not `~= nil`: a NaN or an infinity in config.lua passes a bare `> 0`
     local rate = field.DECAY_PER_MINUTE
-    if rate ~= nil and rate > 0 then
+    if finite(rate) and rate > 0 then
       patch[key] = -(rate * minutes)
       count = count + 1
     end
@@ -375,8 +372,8 @@ function Needs.decay(elapsedMs)
   return Needs.apply(patch, true) or {}
 end
 
---- The largest move on any need since the last push. A character with no push behind it has
---- everything to say, so that answers infinity.
+--- The largest move on any need since the last acknowledged push. A character with no push
+--- behind it has everything to say, so that answers infinity.
 ---@return number
 function Needs.drift()
   local pushed = Needs.pushed

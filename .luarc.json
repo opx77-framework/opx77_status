@@ -15,11 +15,16 @@
     "Wait",
     "AddEventHandler",
     "TriggerEvent",
+    "RegisterNetEvent",
+    "TriggerServerEvent",
+    "TriggerClientEvent",
     "GetCurrentResourceName",
     "GetResourceState",
     "GetInvokingResource",
     "GetInvokingResourceGeneration",
+    "source",
     "exports",
+    "json",
     "print"
   ],
   "diagnostics.disable": [
@@ -38,7 +43,6 @@
     "quote_style": "double"
   },
   "workspace.ignoreDir": [
-    ".claude",
-    "tools"
+    ".claude"
   ]
 }

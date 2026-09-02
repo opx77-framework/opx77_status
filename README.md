@@ -7,7 +7,7 @@
 >
 > **Do not rely on the current API for production resources yet.**
 
-A shared status-effect strip and the character's gameplay needs, for **Opx77**. Any resource adds a chip — bleeding, over encumbered, a wanted level, a buff on a timer — and this one owns the surface, the ordering and the countdown. It also owns `hunger`, `thirst`, `stamina`, `ram` and `streetCred`, in its own table, and serves them to `opx77_hud`.
+A shared status-effect strip and the character's gameplay needs, for **Opx77**. Any resource adds a chip — bleeding, over encumbered, a wanted level, a buff on a timer — and this one owns the surface, the ordering and the countdown. It also owns `hunger`, `thirst`, `stamina` and `streetCred`, in its own table, and serves them to `opx77_hud`.
 
 > [!IMPORTANT]
 > **The citizen id and the values arrive from the client and are taken at face value.** There is no ownership proof and no server-side re-derivation: this is the project owner's ruling, not an oversight. Every value is still type-checked and clamped before it reaches a column, and both net events are rate limited.
@@ -64,7 +64,8 @@ All three are client-local: a listener needs a plain `AddEventHandler` and no pe
 3. The server answers `opx77_status:values` with the stored row, or the defaults in `config.lua` when there is none.
 4. The client owns the values from there: it decays hunger and thirst, serves them, and raises `opx77:status:needs` on every change.
 5. It pushes them back on `opx77_status:push` every `PUSH_MS`, and at once when any need moves `PUSH_DELTA`.
-6. The server holds the last push in memory and writes it on `onPlayerDisconnected` and every `AUTOSAVE_MS`. A client cannot send anything at disconnect, so the throttled push during play is what makes the saved value fresh.
+6. The server answers `opx77_status:pushed`. Until that arrives the client keeps counting the drift the push carried, so a push the server refused — past its rate limit, or malformed — is sent again instead of being lost.
+7. The server holds the last push in memory and writes it on `onPlayerDisconnected` and every `AUTOSAVE_MS`. A client cannot send anything at disconnect, so the throttled push during play is what makes the saved value fresh.
 
 `opx77:client:onPlayerUnloaded` clears everything client-side.
 
@@ -75,6 +76,10 @@ All three are client-local: a listener needs a plain `AddEventHandler` and no pe
 ## Configuration
 
 `config.lua`. Where the strip sits, how many chips are drawn before it collapses into a counter, and every need with its bounds, its value on a new character, its decay rate and the two intervals that govern the write path.
+
+## Locales
+
+There is no `locales/` here and no `LOCALE` in `config.lua`, and that is deliberate: every word on the strip is a chip label the calling resource supplied, so that resource is where it is translated. The only strings this one owns are `Open77.log` lines and the error codes, and neither is translated.
 
 ## Community & Support
 

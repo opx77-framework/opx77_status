@@ -1,8 +1,12 @@
---- The server half: the status table, the two net events, and the save paths. Every value
---- here came off a client and is bounded before it reaches a column, never re-derived.
+--- The server half: the status table, the net events, and the save paths. Every value here
+--- came off a client and is bounded before it reaches a column, never re-derived.
 
 local Config = OPX_STATUS_CONFIG
 local FIELDS = Config.NEEDS
+local Text = OpxStatus.Text
+
+--- How long a log line off the wire may be, in characters.
+local MAX_LOGGED = 64
 
 local CREATE = [[
 CREATE TABLE IF NOT EXISTS opx77_character_status (
@@ -74,9 +78,7 @@ end
 ---@param value any
 ---@return string
 local function safe(value)
-  local text = tostring(value or ""):gsub("[%c]", " ")
-  if #text > 64 then text = text:sub(1, 64) .. "..." end
-  return text
+  return Text.clean(tostring(value or ""), MAX_LOGGED, "...") or ""
 end
 
 --- A citizen id, taken at face value: shaped like one and short enough for the column.
@@ -196,6 +198,8 @@ RegisterNetEvent("opx77_status:push", function(rawCitizenId, rawValues)
   local values = bounded(rawValues)
   if values == nil then return end
   held[player] = { citizenId = id, values = values, dirty = true }
+  -- the client holds its drift until this lands, so a push refused above is sent again
+  TriggerClientEvent("opx77_status:pushed", player, id)
 end)
 
 --- The player has gone. Their last push during play is the freshest thing that exists: the
@@ -217,6 +221,11 @@ AddEventHandler("onResourceStop", function(name)
   for player in pairs(held) do flush(player, false) end
 end)
 
+--- One autosave pass, so a raise from a host call ends the pass rather than the loop.
+local function autosave()
+  for player in pairs(held) do flush(player, false) end
+end
+
 CreateThread(function()
   local created, reason = run("update", CREATE)
   if not created then
@@ -227,8 +236,15 @@ CreateThread(function()
   schemaReady = true
   Open77.log.info("ready")
 
+  local failing = false
   while true do
     Wait(Config.AUTOSAVE_MS)
-    for player in pairs(held) do flush(player, false) end
+    local ok, failure = pcall(autosave)
+    if ok then
+      failing = false
+    elseif not failing then
+      failing = true
+      Open77.log.error(("the autosave failed: %s"):format(tostring(failure)))
+    end
   end
 end)
