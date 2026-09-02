@@ -22,7 +22,7 @@ local Runtime = {}
 OpxStatus.runtime = Runtime
 
 local RESOURCE = GetCurrentResourceName()
-
+local CORE = "opx77_core"
 
 local drawn = nil
 
@@ -43,10 +43,8 @@ local function emit(effect, action)
     data = effect.data,
   }
   if effect.event then TriggerEvent(effect.event, payload) end
-  local global = GLOBAL_EVENT
-  if global and global ~= false and global ~= effect.event then
-    TriggerEvent(global, payload)
-  end
+  -- once, not twice, when the owner named GLOBAL_EVENT as its own event
+  if GLOBAL_EVENT ~= effect.event then TriggerEvent(GLOBAL_EVENT, payload) end
 end
 
 --- What would be drawn, minus the countdowns the hud animates on its own clock.
@@ -66,9 +64,6 @@ local function signature(view)
 end
 
 --- What this resource holds, published for opx77_hud to draw.
----
---- An event, not a surface. This resource owns the effects; the one corner of the screen they
---- appear in belongs to the hud, which already places, themes and animates a surface there.
 ---@param force boolean|nil
 local function draw(force)
   local view = State.view(nowMs())
@@ -111,13 +106,8 @@ function Runtime.add(owner, spec)
   return effect
 end
 
----@param owner string
----@param id string
---- The patched value, or the held one when the patch says nothing.
----
---- An `if`, not `given ~= nil and given or held`: that collapses on `false` and
---- keeps the old value, so a caller passing `false` for a label was answered
---- `ok` instead of `invalid_label`.
+--- The patched value, or the held one when the patch says nothing. An `if` rather than
+--- `given ~= nil and given or held`, which collapses on `false`.
 ---@param given any
 ---@param held any
 ---@return any
@@ -126,6 +116,8 @@ local function pick(given, held)
   return held
 end
 
+---@param owner string
+---@param id string
 ---@param patch table
 ---@return boolean ok
 ---@return string|nil reason
@@ -217,6 +209,149 @@ local function tick()
   if expired > 0 or stoppedCount > 0 then draw() end
 end
 
+-- ---------------------------------------------------------------------------
+-- The needs
+-- ---------------------------------------------------------------------------
+
+local Needs = OpxStatus.needs
+
+--- How long the client waits before asking the server half again for a character it has an
+--- id for but no values.
+local PULL_RETRY_MS = 10000
+
+local lastDecayAtMs, lastPushAtMs, lastPullAtMs = 0, 0, 0
+
+--- Tell everything on the client that a need moved. opx77_hud redraws from this.
+---@param source string
+---@param changed NeedKey[]
+local function publishNeeds(source, changed)
+  TriggerEvent(Config.NEEDS_EVENT, {
+    values = Needs.snapshot(),
+    changed = changed,
+    source = source,
+    citizenId = Needs.citizenId,
+    ready = Needs.ready,
+  })
+end
+
+--- Ask the server half for this character's stored values.
+---@param atMs integer
+local function pull(atMs)
+  lastPullAtMs = atMs
+  local accepted, reason = TriggerServerEvent("opx77_status:pull", Needs.citizenId)
+  if not accepted then
+    Open77.log.warn(("needs not requested: %s"):format(tostring(reason)))
+  end
+end
+
+--- Send the held values back. Skipped unless PUSH_MS has passed or a need moved PUSH_DELTA,
+--- because the disconnect is the one moment this client cannot speak.
+---@param atMs integer
+---@param force boolean|nil
+---@return boolean sent
+local function push(atMs, force)
+  if not Needs.ready or Needs.citizenId == nil then return false end
+  local drift = Needs.drift()
+  if drift <= 0 and not force then return false end
+  if not force and drift < Config.PUSH_DELTA and atMs - lastPushAtMs < Config.PUSH_MS then
+    return false
+  end
+
+  local values = Needs.snapshot()
+  local accepted, reason = TriggerServerEvent("opx77_status:push", Needs.citizenId, values)
+  if not accepted then
+    Open77.log.warn(("needs not pushed: %s"):format(tostring(reason)))
+    return false
+  end
+  Needs.pushed = values
+  lastPushAtMs = atMs
+  return true
+end
+
+Runtime.pushNeeds = push
+
+--- Adopt a character and ask for its values. Idempotent: the same id twice does nothing.
+---@param citizenId any
+function Runtime.bindCharacter(citizenId)
+  if type(citizenId) ~= "string" or citizenId == "" then return end
+  if Needs.citizenId == citizenId then return end
+  Needs.begin(citizenId)
+  local atMs = nowMs()
+  lastDecayAtMs, lastPushAtMs = atMs, atMs
+  pull(atMs)
+end
+
+--- Apply a patch from an export and publish whatever moved.
+---@param patch table
+---@param relative boolean
+---@param source string
+---@return NeedKey[]|nil changed
+---@return string|nil reason
+function Runtime.patchNeeds(patch, relative, source)
+  local changed, reason = Needs.apply(patch, relative)
+  if changed == nil then return nil, reason end
+  if #changed > 0 then
+    publishNeeds(source, changed)
+    push(nowMs(), false)
+  end
+  return changed
+end
+
+--- Decay, the throttled push, and the retry for a character the server never answered for.
+local function needsTick()
+  local atMs = nowMs()
+
+  if Needs.citizenId == nil then return end
+  if not Needs.ready then
+    if atMs - lastPullAtMs >= PULL_RETRY_MS then pull(atMs) end
+    return
+  end
+
+  local elapsed = atMs - lastDecayAtMs
+  if elapsed >= Config.DECAY_MS then
+    lastDecayAtMs = atMs
+    local changed = Needs.decay(elapsed)
+    if #changed > 0 then publishNeeds("decay", changed) end
+  end
+
+  push(atMs, false)
+end
+
+AddEventHandler("opx77:client:onPlayerLoaded", function(playerData)
+  if type(playerData) ~= "table" then return end
+  Runtime.bindCharacter(playerData.citizenId)
+end)
+
+AddEventHandler("opx77:client:onPlayerUnloaded", function()
+  if Needs.citizenId == nil then return end
+  Needs.forget()
+  publishNeeds("unloaded", {})
+end)
+
+--- The server half answered the pull. A late answer for a character that has already been
+--- swapped out is dropped.
+RegisterNetEvent("opx77_status:values", function(citizenId, values)
+  if citizenId ~= Needs.citizenId then return end
+  Needs.receive(values)
+  local atMs = nowMs()
+  lastDecayAtMs, lastPushAtMs = atMs, atMs
+  local changed = {}
+  for key in pairs(Needs.values) do changed[#changed + 1] = key end
+  table.sort(changed)
+  publishNeeds("loaded", changed)
+end)
+
+--- Catch up when this resource starts mid-session: the core's loaded event has already been
+--- and gone, so the character is read straight off its export. Coroutine only.
+local function adoptRunningCharacter()
+  if GetResourceState(CORE) ~= "running" then return end
+  local promise = Open77.exports.call(CORE, "GetPlayerData")
+  if not promise then return end
+  local result, callError = promise:await()
+  if callError or type(result) ~= "table" or result.ok ~= true then return end
+  if type(result.data) == "table" then Runtime.bindCharacter(result.data.citizenId) end
+end
+
 AddEventHandler("onClientResourceStart", function(name)
   if name ~= RESOURCE then return end
 
@@ -226,22 +361,30 @@ AddEventHandler("onClientResourceStart", function(name)
       Wait(TICK_MS)
     end
   end)
+
+  CreateThread(function()
+    adoptRunningCharacter()
+    local cadence = math.max(1000, math.min(Config.DECAY_MS, Config.PUSH_MS))
+    while true do
+      Wait(cadence)
+      needsTick()
+    end
+  end)
 end)
 
---- Both halves of teardown, as the first-party client services do it (open77_zones and
---- open77_worldui both branch on the name here): our own stop has to take the strip down,
---- and another resource's stop takes its chips down now rather than at the next tick.
+--- Teardown for both halves: our own stop takes the strip down, another resource's stop
+--- takes its chips down now rather than at the next tick.
 AddEventHandler("onClientResourceStop", function(name)
   if name == RESOURCE then
-    -- The chips are drawn in opx77_hud's page, and nothing over there knows this resource
-    -- stopped: the last thing it does is publish an empty strip, or its chips stay on screen
-    -- for the rest of the session. `force`, because `drawn` is only a record of what was last
-    -- published, and a stop is the one publish with no later one to correct it.
+    -- a reload is the one stop this client survives, so the values go back first
+    Runtime.pushNeeds(nowMs(), true)
     State.byOwner = {}
     State.generations = {}
+    -- forced: nothing in opx77_hud's page knows this resource stopped, and there is no
+    -- later publish to correct an empty strip with
     draw(true)
-    -- No `emit` for the effects that just went. An owner's handler is free to call straight
-    -- back into an export, and this VM is halfway through stopping.
+    -- no `emit`: an owner's handler is free to call straight back into an export, and this
+    -- VM is halfway through stopping
     return
   end
 
