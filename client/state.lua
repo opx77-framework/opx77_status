@@ -1,12 +1,12 @@
---- The registry of live effects: validation, ordering and expiry.
+--- The registry of live effects, and the character's needs: validation, ordering and expiry.
 
 OpxStatus = OpxStatus or {}
 
---- Mirrors `version` in open77.lua, which no Lua code can read. Nothing checks that the two
---- agree, so a release moves both lines or the copy a caller reads is a lie.
-OpxStatus.VERSION = "0.2.0"
+--- Mirrors `version` in open77.lua, which no Lua code can read; a release moves both lines.
+OpxStatus.VERSION = "0.3.0"
 
 local Config = OPX_STATUS_CONFIG
+local Text = OpxStatus.Text
 
 local State = {}
 OpxStatus.state = State
@@ -26,9 +26,7 @@ State.byOwner = {}
 --- owner -> the generation we last saw it at
 State.generations = {}
 
---- A finite number: a number, not NaN, and neither infinity. One predicate, spelled the same
---- way in every resource of this framework; the coercing form that answers with the number
---- rather than a verdict is called `finiteNumber`.
+--- A finite number: a number, not NaN, and neither infinity.
 ---@param value any
 ---@return boolean
 local function finite(value)
@@ -43,19 +41,6 @@ end
 function State.validName(value, maximum)
   return type(value) == "string" and #value > 0 and #value <= maximum
     and value:match("^[%w_:%-%.]+$") ~= nil
-end
-
---- Display text, cleaned rather than refused: a label is cosmetic.
----@param value any
----@param maximum integer
----@return string|nil
-local function displayText(value, maximum)
-  if value == nil then return nil end
-  if type(value) == "number" then value = tostring(value) end
-  if type(value) ~= "string" then return nil end
-  value = value:gsub("[%c]", " ")
-  if #value > maximum then value = value:sub(1, maximum) end
-  return value
 end
 
 --- Count a caller's opaque table, refusing rather than truncating it.
@@ -92,7 +77,7 @@ function State.normalize(owner, spec, atMs)
   if id == nil then return nil, "missing_id" end
   if not State.validName(id, 64) then return nil, "invalid_id" end
 
-  local label = displayText(spec.label, MAX_LABEL)
+  local label = Text.clean(spec.label, MAX_LABEL)
   if label == nil or label == "" then return nil, "invalid_label" end
 
   if spec.event ~= nil and not State.validName(spec.event, MAX_EVENT) then
@@ -125,7 +110,7 @@ function State.normalize(owner, spec, atMs)
     owner = owner,
     id = id,
     label = label,
-    icon = displayText(spec.icon, MAX_ICON),
+    icon = Text.clean(spec.icon, MAX_ICON),
     tone = tone,
     -- absolute, not remaining: the page counts down from this on its own clock
     expiresAtMs = duration and (atMs + math.floor(duration)) or nil,
@@ -234,4 +219,169 @@ function State.expired(atMs)
     end
   end
   return due
+end
+
+-- ---------------------------------------------------------------------------
+-- The needs
+-- ---------------------------------------------------------------------------
+
+--- The character's needs. The client owns these during play; the server half only stores
+--- what it was last pushed.
+local Needs = {}
+OpxStatus.needs = Needs
+
+local FIELDS = Config.NEEDS
+
+--- The character these values belong to, or nil when none is loaded.
+---@type CitizenId|nil
+Needs.citizenId = nil
+
+--- True once the server half has answered for `citizenId`.
+Needs.ready = false
+
+--- key -> number, one entry per key of Config.NEEDS.
+---@type NeedValues
+Needs.values = {}
+
+--- The last values the server acknowledged, so a push that would say nothing is skipped.
+---@type NeedValues|nil
+Needs.pushed = nil
+
+--- A push the server has not acknowledged yet. It stays out of `pushed`, so the drift it
+--- carries survives a push the server dropped and is sent again.
+---@type NeedValues|nil
+Needs.pending = nil
+
+--- Whether a key is a need this resource owns.
+---@param key any
+---@return boolean
+function Needs.isField(key)
+  return type(key) == "string" and FIELDS[key] ~= nil
+end
+
+--- One value in its field's bounds, or nil when it is not a finite number.
+---@param key NeedKey
+---@param value any
+---@return number|nil
+function Needs.clamp(key, value)
+  local field = FIELDS[key]
+  if field == nil then return nil end
+  local number = tonumber(value)
+  if not finite(number) then return nil end
+  if number < field.MIN then return field.MIN end
+  if number > field.MAX then return field.MAX end
+  return number
+end
+
+---@return NeedValues
+function Needs.defaults()
+  local values = {}
+  for key, field in pairs(FIELDS) do values[key] = field.DEFAULT end
+  return values
+end
+
+---@return NeedValues
+function Needs.snapshot()
+  local copy = {}
+  for key, value in pairs(Needs.values) do copy[key] = value end
+  return copy
+end
+
+--- Start over on a character, at the defaults, until the server answers.
+---@param citizenId CitizenId
+function Needs.begin(citizenId)
+  Needs.citizenId = citizenId
+  Needs.ready = false
+  Needs.values = Needs.defaults()
+  Needs.pushed = nil
+  Needs.pending = nil
+end
+
+--- Adopt what the server sent, with the defaults filling anything it left out.
+---@param raw any
+function Needs.receive(raw)
+  local values = Needs.defaults()
+  if type(raw) == "table" then
+    for key in pairs(FIELDS) do
+      local clamped = Needs.clamp(key, raw[key])
+      if clamped ~= nil then values[key] = clamped end
+    end
+  end
+  Needs.values = values
+  Needs.ready = true
+  -- what the server just said IS the last push: there is nothing to send back yet
+  Needs.pushed = Needs.snapshot()
+  Needs.pending = nil
+end
+
+function Needs.forget()
+  Needs.citizenId = nil
+  Needs.ready = false
+  Needs.values = {}
+  Needs.pushed = nil
+  Needs.pending = nil
+end
+
+--- Apply a patch, absolute or relative, and answer which keys actually moved.
+---@param patch table<string, number>
+---@param relative boolean  add to the held value rather than replace it
+---@return NeedKey[]|nil changed
+---@return StatusError|nil reason
+function Needs.apply(patch, relative)
+  if type(patch) ~= "table" then return nil, "spec_must_be_a_table" end
+
+  local wanted, count = {}, 0
+  for key, raw in pairs(patch) do
+    if not Needs.isField(key) then return nil, "unknown_need" end
+    local value = tonumber(raw)
+    if not finite(value) then return nil, "invalid_need_value" end
+    local target = value
+    if relative then target = (Needs.values[key] or FIELDS[key].DEFAULT) + value end
+    wanted[key] = Needs.clamp(key, target)
+    count = count + 1
+  end
+  if count == 0 then return nil, "empty_patch" end
+
+  local changed = {}
+  for key, value in pairs(wanted) do
+    if Needs.values[key] ~= value then
+      Needs.values[key] = value
+      changed[#changed + 1] = key
+    end
+  end
+  -- a total order: `pairs` order would reshuffle the list between two identical patches
+  table.sort(changed)
+  return changed
+end
+
+--- Charge `DECAY_PER_MINUTE` against every need that declares one.
+---@param elapsedMs integer
+---@return NeedKey[] changed
+function Needs.decay(elapsedMs)
+  local minutes = elapsedMs / 60000
+  local patch, count = {}, 0
+  for key, field in pairs(FIELDS) do
+    -- `finite`, not `~= nil`: a NaN or an infinity in config.lua passes a bare `> 0`
+    local rate = field.DECAY_PER_MINUTE
+    if finite(rate) and rate > 0 then
+      patch[key] = -(rate * minutes)
+      count = count + 1
+    end
+  end
+  if count == 0 then return {} end
+  return Needs.apply(patch, true) or {}
+end
+
+--- The largest move on any need since the last acknowledged push. A character with no push
+--- behind it has everything to say, so that answers infinity.
+---@return number
+function Needs.drift()
+  local pushed = Needs.pushed
+  if pushed == nil then return math.huge end
+  local worst = 0
+  for key, value in pairs(Needs.values) do
+    local difference = math.abs(value - (pushed[key] or 0))
+    if difference > worst then worst = difference end
+  end
+  return worst
 end

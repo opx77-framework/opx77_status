@@ -2,6 +2,7 @@
 
 local State = OpxStatus.state
 local Runtime = OpxStatus.runtime
+local Needs = OpxStatus.needs
 
 ---@param ok boolean
 ---@param values table|nil
@@ -24,20 +25,6 @@ local function caller()
   Runtime.noteOwner(owner, generation)
   return owner, generation
 end
-
-
----@alias StatusTone "ok"|"warn"|"bad"|"accent"|"bleed"|"burn"|"shock"|"chem"
-
----@class StatusSpec
----@field id string unique per owner
----@field label string
----@field icon? string one or two glyphs
----@field tone? StatusTone a presentation role, or one of 2077's damage types
----@field durationMs? integer it removes itself when this elapses, and tells you
----@field progress? number 0..1, drawn as a fill
----@field priority? number higher survives the MAX_VISIBLE cut
----@field event? string raised for this effect in addition to the global one
----@field data? table opaque, echoed in the payload
 
 --- Show an effect, or replace one of yours with the same id.
 ---@param spec StatusSpec
@@ -80,4 +67,45 @@ exports("clear", function()
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   return response(true, { removed = Runtime.clear(owner) })
+end)
+
+--- The character's needs as this client holds them. `opx77_hud` draws from this and redraws
+--- on OPX_STATUS_CONFIG.NEEDS_EVENT rather than polling it.
+---@return NeedsResponse
+exports("needs", function()
+  local owner, generation = caller()
+  if not owner then return response(false, { error = generation }) end
+  if Needs.citizenId == nil then return response(false, { error = "no_character" }) end
+  if not Needs.ready then
+    return response(false, { error = "not_loaded", citizenId = Needs.citizenId })
+  end
+  return response(true, {
+    values = Needs.snapshot(),
+    citizenId = Needs.citizenId,
+    ready = true,
+  })
+end)
+
+--- Set one or more needs outright. Values are clamped to the bounds in config.lua.
+---@param patch table<NeedKey, number>
+---@return NeedsWriteResponse
+exports("setNeeds", function(patch)
+  local owner, generation = caller()
+  if not owner then return response(false, { error = generation }) end
+  if not Needs.ready then return response(false, { error = "not_loaded" }) end
+  local changed, reason = Runtime.patchNeeds(patch, false, "set")
+  if changed == nil then return response(false, { error = reason }) end
+  return response(true, { values = Needs.snapshot(), changed = changed })
+end)
+
+--- Move one or more needs by a delta: a meal, a shot of stamina, a street cred payout.
+---@param patch table<NeedKey, number>
+---@return NeedsWriteResponse
+exports("addNeeds", function(patch)
+  local owner, generation = caller()
+  if not owner then return response(false, { error = generation }) end
+  if not Needs.ready then return response(false, { error = "not_loaded" }) end
+  local changed, reason = Runtime.patchNeeds(patch, true, "add")
+  if changed == nil then return response(false, { error = reason }) end
+  return response(true, { values = Needs.snapshot(), changed = changed })
 end)
