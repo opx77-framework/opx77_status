@@ -27,19 +27,21 @@ A shared status-effect strip and the character's gameplay needs, for **Opx77**. 
 
 | Export | Does |
 |---|---|
-| `add` | add or replace one of your effects |
-| `update` | patch a field of one |
-| `remove` | take one down |
-| `clear` | take all of yours down |
-| `needs` | the character's needs as this client holds them |
+| `addEffect` | add or replace one of your effects |
+| `updateEffect` | patch a field of one |
+| `removeEffect` | take one down |
+| `clearEffects` | take all of yours down |
+| `getNeeds` | the character's needs as this client holds them |
 | `setNeeds` | set one or more needs outright |
 | `addNeeds` | move one or more needs by a delta |
+
+The effect exports name what they act on, so a call site cannot be read as touching the needs.
 
 Every export answers a table carrying `ok`, never raises, and takes its caller from `GetInvokingResource()`. The error codes are listed in `types.lua`.
 
 ```lua
 CreateThread(function()
-  local promise = Open77.exports.call("opx77_status", "needs")
+  local promise = Open77.exports.call("opx77_status", "getNeeds")
   if not promise then return end
   local result, callError = promise:await()
   if callError or not result.ok then return end
@@ -55,7 +57,7 @@ end)
 | `opx77:status` | one effect expired or was removed | `status`, `owner`, `action`, `label`, `tone`, `data` |
 | `opx77:status:needs` | a need moved | `values`, `changed`, `source`, `citizenId`, `ready` |
 
-All three are client-local: a listener needs a plain `AddEventHandler` and no permission. Redraw from `opx77:status:needs` rather than polling `needs`.
+All three are client-local: a listener needs a plain `AddEventHandler` and no permission. Redraw from `opx77:status:needs` rather than polling `getNeeds`.
 
 ## How the needs travel
 
@@ -64,8 +66,8 @@ All three are client-local: a listener needs a plain `AddEventHandler` and no pe
 3. The server answers `opx77_status:values` with the stored row, or the defaults in `config.lua` when there is none.
 4. The client owns the values from there: it decays hunger and thirst, serves them, and raises `opx77:status:needs` on every change.
 5. It pushes them back on `opx77_status:push` every `PUSH_MS`, and at once when any need moves `PUSH_DELTA`.
-6. The server answers `opx77_status:pushed`. Until that arrives the client keeps counting the drift the push carried, so a push the server refused — past its rate limit, or malformed — is sent again instead of being lost.
-7. The server holds the last push in memory and writes it on `onPlayerDisconnected` and every `AUTOSAVE_MS`. A client cannot send anything at disconnect, so the throttled push during play is what makes the saved value fresh.
+6. The server answers `opx77_status:pushed`. The answer names no push, so the client settles the oldest one still waiting and no later one: a push the server refused — past its rate limit, or malformed — is never counted as stored, and its drift is sent again.
+7. The server holds the last push in memory and writes it on `onPlayerDisconnected`, every `AUTOSAVE_MS`, and when a second character is pulled onto the same slot. A client cannot send anything at disconnect, so the throttled push during play is what makes the saved value fresh.
 
 `opx77:client:onPlayerUnloaded` clears everything client-side.
 

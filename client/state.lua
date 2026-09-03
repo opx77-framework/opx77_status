@@ -3,7 +3,7 @@
 OpxStatus = OpxStatus or {}
 
 --- Mirrors `version` in open77.lua, which no Lua code can read; a release moves both lines.
-OpxStatus.VERSION = "0.3.0"
+OpxStatus.VERSION = "0.4.0"
 
 local Config = OPX_STATUS_CONFIG
 local Text = OpxStatus.Text
@@ -208,14 +208,18 @@ function State.view(atMs)
   return { chips = chips, hidden = math.max(0, #all - limit) }
 end
 
---- Effects whose time is up.
+--- Effects whose time is up, or nil when none are. Built lazily: this runs every tick and
+--- almost every tick has nothing to collect.
 ---@param atMs integer
----@return table[]
+---@return table[]|nil
 function State.expired(atMs)
-  local due = {}
+  local due = nil
   for _, mine in pairs(State.byOwner) do
     for _, effect in pairs(mine) do
-      if effect.expiresAtMs ~= nil and atMs >= effect.expiresAtMs then due[#due + 1] = effect end
+      if effect.expiresAtMs ~= nil and atMs >= effect.expiresAtMs then
+        due = due or {}
+        due[#due + 1] = effect
+      end
     end
   end
   return due
@@ -247,10 +251,46 @@ Needs.values = {}
 ---@type NeedValues|nil
 Needs.pushed = nil
 
---- A push the server has not acknowledged yet. It stays out of `pushed`, so the drift it
---- carries survives a push the server dropped and is sent again.
----@type NeedValues|nil
-Needs.pending = nil
+--- Every push sent, by its send index, until it is acknowledged. The acknowledgement names
+--- no push, so the nth one settles the nth push and no later one.
+---@type table<integer, NeedValues>
+Needs.sent = {}
+
+--- How many pushes have been sent, and how many of those have been acknowledged.
+Needs.sentCount = 0
+Needs.ackedCount = 0
+
+--- Pushes held for an acknowledgement that may never arrive. Past this the oldest is
+--- forgotten, which leaves `pushed` where it is: a redundant push, never a lost value.
+local MAX_UNACKED = 8
+
+--- Forget every push still waiting, without moving `pushed`.
+local function forgetSent()
+  Needs.sent = {}
+  Needs.sentCount = 0
+  Needs.ackedCount = 0
+end
+
+--- Note a push on its way out.
+---@param values NeedValues  the snapshot that was sent
+function Needs.sending(values)
+  Needs.sentCount = Needs.sentCount + 1
+  Needs.sent[Needs.sentCount] = values
+  Needs.sent[Needs.sentCount - MAX_UNACKED] = nil
+end
+
+--- Settle the oldest push still waiting. `pushed` only ever moves to a snapshot the server
+--- has certainly seen, so the drift a dropped push carried is sent again rather than lost.
+---@return boolean settled
+function Needs.acknowledge()
+  if Needs.ackedCount >= Needs.sentCount then return false end
+  Needs.ackedCount = Needs.ackedCount + 1
+  local values = Needs.sent[Needs.ackedCount]
+  Needs.sent[Needs.ackedCount] = nil
+  if values == nil then return false end
+  Needs.pushed = values
+  return true
+end
 
 --- Whether a key is a need this resource owns.
 ---@param key any
@@ -294,7 +334,7 @@ function Needs.begin(citizenId)
   Needs.ready = false
   Needs.values = Needs.defaults()
   Needs.pushed = nil
-  Needs.pending = nil
+  forgetSent()
 end
 
 --- Adopt what the server sent, with the defaults filling anything it left out.
@@ -311,7 +351,7 @@ function Needs.receive(raw)
   Needs.ready = true
   -- what the server just said IS the last push: there is nothing to send back yet
   Needs.pushed = Needs.snapshot()
-  Needs.pending = nil
+  forgetSent()
 end
 
 function Needs.forget()
@@ -319,7 +359,7 @@ function Needs.forget()
   Needs.ready = false
   Needs.values = {}
   Needs.pushed = nil
-  Needs.pending = nil
+  forgetSent()
 end
 
 --- Apply a patch, absolute or relative, and answer which keys actually moved.

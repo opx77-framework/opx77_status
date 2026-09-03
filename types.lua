@@ -29,7 +29,7 @@
 ---| "no_character"          opx77_core has no character loaded
 ---| "not_loaded"            the server half has not answered for this character yet
 
---- One effect handed to the `add` export.
+--- One effect handed to the `addEffect` export.
 ---@class StatusSpec
 ---@field id string unique per owner
 ---@field label string
@@ -89,7 +89,7 @@
 ---@field ok boolean
 ---@field error StatusError|nil
 
---- What the `needs` export answers when a character is loaded and the server has replied.
+--- What the `getNeeds` export answers when a character is loaded and the server has replied.
 ---@class NeedsResponse : StatusResponse
 ---@field values NeedValues|nil
 ---@field citizenId CitizenId|nil
