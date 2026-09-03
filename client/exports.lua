@@ -29,10 +29,10 @@ end
 --- Show an effect, or replace one of yours with the same id.
 ---@param spec StatusSpec
 ---@return table
-exports("add", function(spec)
+exports("addEffect", function(spec)
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
-  local effect, reason = Runtime.add(owner, spec)
+  local effect, reason = Runtime.addEffect(owner, spec)
   if effect == nil then return response(false, { error = reason }) end
   return response(true, { id = effect.id })
 end)
@@ -41,11 +41,11 @@ end)
 ---@param id string
 ---@param patch StatusSpec fields absent from it keep the value they have
 ---@return table
-exports("update", function(id, patch)
+exports("updateEffect", function(id, patch)
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   if not State.validName(id, 64) then return response(false, { error = "invalid_id" }) end
-  local ok, reason = Runtime.update(owner, id, patch)
+  local ok, reason = Runtime.updateEffect(owner, id, patch)
   if not ok then return response(false, { error = reason }) end
   return response(true, {})
 end)
@@ -53,26 +53,26 @@ end)
 --- Take one of yours down; removing what is not there is `not_found`, never a raise.
 ---@param id string
 ---@return table
-exports("remove", function(id)
+exports("removeEffect", function(id)
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   if not State.validName(id, 64) then return response(false, { error = "invalid_id" }) end
-  if not Runtime.remove(owner, id) then return response(false, { error = "not_found" }) end
+  if not Runtime.removeEffect(owner, id) then return response(false, { error = "not_found" }) end
   return response(true, {})
 end)
 
 --- Take down everything of yours. Never touches another resource's.
 ---@return table
-exports("clear", function()
+exports("clearEffects", function()
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
-  return response(true, { removed = Runtime.clear(owner) })
+  return response(true, { removed = Runtime.clearEffects(owner) })
 end)
 
 --- The character's needs as this client holds them. `opx77_hud` draws from this and redraws
 --- on OPX_STATUS_CONFIG.NEEDS_EVENT rather than polling it.
 ---@return NeedsResponse
-exports("needs", function()
+exports("getNeeds", function()
   local owner, generation = caller()
   if not owner then return response(false, { error = generation }) end
   if Needs.citizenId == nil then return response(false, { error = "no_character" }) end

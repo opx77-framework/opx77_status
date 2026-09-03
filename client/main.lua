@@ -90,8 +90,6 @@ local function draw(force)
   })
 end
 
-Runtime.draw = draw
-
 --- Note the caller's generation, dropping everything it held if it has reloaded.
 ---@param owner string
 ---@param generation integer
@@ -106,7 +104,7 @@ end
 ---@param spec table
 ---@return table|nil effect
 ---@return string|nil reason
-function Runtime.add(owner, spec)
+function Runtime.addEffect(owner, spec)
   local effect, reason = State.normalize(owner, spec, nowMs())
   if effect == nil then return nil, reason end
   -- replacing your own is not a new effect: the limit only guards additions
@@ -133,7 +131,7 @@ end
 ---@param patch table
 ---@return boolean ok
 ---@return string|nil reason
-function Runtime.update(owner, id, patch)
+function Runtime.updateEffect(owner, id, patch)
   local current = State.get(owner, id)
   if current == nil then return false, "not_found" end
   if type(patch) ~= "table" then return false, "spec_must_be_a_table" end
@@ -163,7 +161,7 @@ end
 ---@param owner string
 ---@param id string
 ---@return boolean
-function Runtime.remove(owner, id)
+function Runtime.removeEffect(owner, id)
   local effect = State.get(owner, id)
   if effect == nil then return false end
   State.remove(owner, id)
@@ -174,7 +172,7 @@ end
 
 ---@param owner string
 ---@return integer removed
-function Runtime.clear(owner)
+function Runtime.clearEffects(owner)
   local removed = State.removeOwner(owner)
   if removed > 0 then draw() end
   return removed
@@ -221,14 +219,16 @@ local function tick()
   local atMs = nowMs()
 
   local due = State.expired(atMs)
-  local expired = #due
+  local expired = due and #due or 0
   for index = 1, expired do
     local effect = due[index]
     State.remove(effect.owner, effect.id)
     emit(effect, "expired")
   end
 
-  if expired > 0 or sweepOwners(atMs) > 0 then draw() end
+  -- called before the test, not inside it: an expiry must not postpone the sweep
+  local swept = sweepOwners(atMs)
+  if expired > 0 or swept > 0 then draw() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -285,9 +285,9 @@ local function push(atMs, force)
     Open77.log.warn(("needs not pushed: %s"):format(tostring(reason)))
     return false
   end
-  -- pending, not pushed: `accepted` says the event left, not that the server kept it, and a
+  -- noted, not pushed: `accepted` says the event left, not that the server kept it, and a
   -- push past its rate limit is dropped there in silence
-  Needs.pending = values
+  Needs.sending(values)
   lastPushAtMs = atMs
   return true
 end
@@ -352,12 +352,11 @@ AddEventHandler("opx77:client:onPlayerUnloaded", function()
   publishNeeds("unloaded", {})
 end)
 
---- The server kept a push. Only now is the drift it carried settled: until this arrives the
---- values stay in `drift` and the next tick sends them again.
+--- The server kept a push. It names no push, so this settles the oldest one still waiting
+--- and never a later one: the drift a dropped push carried stays and is sent again.
 RegisterNetEvent("opx77_status:pushed", function(citizenId)
-  if citizenId ~= Needs.citizenId or Needs.pending == nil then return end
-  Needs.pushed = Needs.pending
-  Needs.pending = nil
+  if citizenId ~= Needs.citizenId then return end
+  Needs.acknowledge()
 end)
 
 --- The server half answered the pull. A late answer for a character that has already been

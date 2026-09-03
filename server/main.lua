@@ -190,6 +190,11 @@ RegisterNetEvent("opx77_status:pull", function(rawCitizenId)
       Open77.log.warn(("%s could not be read: %s"):format(safe(id), tostring(reason)))
       return
     end
+    -- a second character on one slot: the outgoing one's last push is written before the
+    -- record holding it is replaced, since no event announces a character being put down
+    local previous = held[player]
+    if previous ~= nil and previous.citizenId ~= id then flush(player, false) end
+
     held[player] = { citizenId = id, values = values, dirty = false }
     TriggerClientEvent("opx77_status:values", player, id, values)
   end)
