@@ -17,5 +17,8 @@ client_script "client/exports.lua"
 
 permissions {
   "network.events", -- opx77_status:pull, :push, :values and :pushed
-  "database.access", -- opx77_character_status, this resource's own table
+  -- opx77_character_status is this resource's own table. opx77_characters belongs to
+  -- opx77_core and is only ever READ here, to check that a caller owns the character
+  -- whose needs they are asking for.
+  "database.access",
 }

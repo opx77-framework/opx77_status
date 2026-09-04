@@ -24,6 +24,13 @@ INSERT INTO opx77_character_status (citizen_id, needs) VALUES (@citizen, @needs)
 ON DUPLICATE KEY UPDATE needs = @needs
 ]]
 
+--- Does this account own this character? `opx77_characters` belongs to opx77_core, which is
+--- the only writer; this resource reads it to answer one question and never writes it.
+local OWNS_CHARACTER = [[
+SELECT 1 AS ok FROM opx77_characters
+WHERE citizen_id = @citizen AND user_id = @user AND deleted_at IS NULL
+]]
+
 --- player -> { citizenId, values, dirty }. The last push each loaded player sent.
 local held = {}
 
@@ -40,13 +47,29 @@ local schemaReady = false
 
 --- The scheduler clock in milliseconds; `monotonic` answers SECONDS. A non-finite reading is
 --- dropped rather than propagated: a NaN would expire nothing, an infinity everything.
+---
+--- Keeping the last good reading is not enough on its own. If `monotonic` stops answering,
+--- a frozen clock makes every rate-limit window look brand new AND never elapsed, so
+--- `within` refuses every pull and every push for the rest of the process: nobody's needs
+--- load, nobody's save. `GetGameTimer` is the same scheduler clock already in milliseconds,
+--- so it is the honest fallback rather than a second source of truth.
 ---@return integer
 local lastMs = 0
+local clockWarned = false
 local function nowMs()
   local read, seconds = pcall(Open77.time.monotonic)
   if read and type(seconds) == "number" and seconds == seconds and
     seconds >= 0 and seconds < math.huge then
     lastMs = math.floor(seconds * 1000)
+    return lastMs
+  end
+  local ticked, ms = pcall(GetGameTimer)
+  if ticked and type(ms) == "number" and ms == ms and ms >= 0 and ms < math.huge then
+    if not clockWarned then
+      clockWarned = true
+      Open77.log.warn("Open77.time.monotonic unreadable; falling back to GetGameTimer")
+    end
+    lastMs = math.floor(ms)
   end
   return lastMs
 end
@@ -87,6 +110,19 @@ end
 ---@return string
 local function safe(value)
   return Text.clean(tostring(value or ""), MAX_LOGGED, "...") or ""
+end
+
+--- The account behind an admitted player, or nil when the host does not vouch for them.
+--- No permission is needed for this call; `userId` is the Master account id, stable across
+--- renames, which is why it and not the display name is what a row is keyed against.
+---@param player integer
+---@return string|nil
+local function userIdOf(player)
+  local ok, identity = pcall(Open77.players.identity, player)
+  if not ok or type(identity) ~= "table" then return nil end
+  local userId = identity.userId
+  if type(userId) ~= "string" or userId == "" then return nil end
+  return userId
 end
 
 --- A citizen id, taken at face value: shaped like one and short enough for the column.
@@ -166,25 +202,46 @@ end
 --- Write a player's last push, if there is one that has not been written yet.
 ---@param player integer
 ---@param forget boolean  also drop the record, for a player who has gone
-local function flush(player, forget)
+---@param now? boolean  write on this stack instead of the next tick, for a resource stopping
+local function flush(player, forget, now)
   local record = held[player]
   if forget then held[player] = nil end
   if record == nil or not record.dirty or not schemaReady then return end
   record.dirty = false
+  if now then
+    -- a stopping resource never sees another tick, so a CreateThread here writes nothing.
+    -- `run` is pcall-guarded: off a coroutine this fails and says so, it does not raise.
+    if not save(record.citizenId, record.values) then record.dirty = not forget end
+    return
+  end
   CreateThread(function()
     if not save(record.citizenId, record.values) then record.dirty = not forget end
   end)
 end
 
---- A client says which character it is. The id is trusted; only its shape is checked.
+--- A client says which character it is. The shape is checked here and the claim is checked
+--- against the database below: a citizen id travels in every needs event, so a client that
+--- names someone else's character must not be handed -- or allowed to overwrite -- their row.
 RegisterNetEvent("opx77_status:pull", function(rawCitizenId)
   local player = tonumber(source) or 0
   if player <= 0 then return end
   if not within(pullWindows, player, PULLS_PER_WINDOW, WINDOW_MS) then return end
   local id = citizenId(rawCitizenId)
   if id == nil or not schemaReady then return end
+  local userId = userIdOf(player)
+  if userId == nil then return end
 
   CreateThread(function()
+    local owned, row = run("single", OWNS_CHARACTER, { citizen = id, user = userId })
+    if not owned then
+      Open77.log.warn(("%s ownership unreadable: %s"):format(safe(id), tostring(row)))
+      return
+    end
+    if type(row) ~= "table" or row.ok == nil then
+      Open77.log.warn(("%s refused for %s: not their character"):format(safe(id), safe(userId)))
+      return
+    end
+
     local values, reason = load(id)
     if values == nil then
       Open77.log.warn(("%s could not be read: %s"):format(safe(id), tostring(reason)))
@@ -210,28 +267,42 @@ RegisterNetEvent("opx77_status:push", function(rawCitizenId, rawValues)
   if id == nil then return end
   local values = bounded(rawValues)
   if values == nil then return end
-  held[player] = { citizenId = id, values = values, dirty = true }
+  -- a push only ever lands on the character this player pulled, which is the character the
+  -- ownership check above admitted. That check is paid once per pull, never on this path.
+  local record = held[player]
+  if record == nil or record.citizenId ~= id then return end
+  record.values, record.dirty = values, true
   -- the client holds its drift until this lands, so a push refused above is sent again
   TriggerClientEvent("opx77_status:pushed", player, id)
 end)
 
 --- The player has gone. Their last push during play is the freshest thing that exists: the
 --- client cannot send anything from here.
----@param rawPlayerId any
-local function departed(rawPlayerId)
+---
+--- `reason` separates a quit or a dropped link (`connection_closed`, where the last push can
+--- be up to one push interval old) from an administrative disconnect (where the client had
+--- time to push). That is the difference between a save bug and normal behaviour in a report.
+---@param rawPlayerId any  a string, like every host event argument
+---@param reason any
+local function departed(rawPlayerId, reason)
   local player = tonumber(rawPlayerId) or 0
   if player <= 0 then return end
+  local record = held[player]
+  if record ~= nil and record.dirty then
+    Open77.log.info(("%s saving on departure (%s)"):format(safe(record.citizenId), safe(reason)))
+  end
   flush(player, true)
   pullWindows[player] = nil
   pushWindows[player] = nil
 end
 
--- the only departure event this platform raises
+-- the departure of an ADMITTED player. A connection refused at the door never reaches here;
+-- that is `onPlayerRejected`, which this resource has no reason to listen for.
 AddEventHandler("onPlayerDisconnected", departed)
 
 AddEventHandler("onResourceStop", function(name)
   if name ~= GetCurrentResourceName() then return end
-  for player in pairs(held) do flush(player, false) end
+  for player in pairs(held) do flush(player, false, true) end
 end)
 
 --- One autosave pass, so a raise from a host call ends the pass rather than the loop.
